@@ -643,8 +643,13 @@ Return ONLY JSON."""
         sql = ""
         method = "llm"
 
-        # Try template matching
-        if self.enable_templates and knowledge and intent.get("confidence_level") == "high":
+        # Try template matching — SKIP if query involves time/dates (templates lack temporal context)
+        query_lower = ctx.get("normalized_query", "").lower()
+        has_time_terms = any(t in query_lower for t in (
+            "fiscal", "year", "month", "quarter", "date", "ytd", "yoy", "period",
+            "current", "last", "previous", "recent", "this year", "last year",
+        ))
+        if self.enable_templates and knowledge and intent.get("confidence_level") == "high" and not has_time_terms:
             templates = knowledge.get("sql_templates", {})
             if templates:
                 tmap = {
@@ -1072,16 +1077,45 @@ A SQL query was generated for the user's question but it FAILED.
             if first_check not in ("SELECT", "WITH"):
                 trace_events.append(f"Judge SQL invalid (starts with {first_check}) — stopping retry")
                 break
+            blocked_found = False
             for kw in blocked:
                 if kw in tokens_check:
                     trace_events.append(f"Judge SQL contains blocked keyword {kw} — stopping retry")
+                    blocked_found = True
                     break
+            if blocked_found:
+                break
 
             # Re-apply dedup if needed
             if self.dedup_subquery:
                 new_fixed = self._apply_dedup_subquery(final_sql, knowledge, schema_ddl)
                 if new_fixed != final_sql:
                     final_sql = new_fixed
+
+            # Re-apply mandatory date filter (judge SQL may not include it)
+            mf = (self.mandatory_filter or "").strip()
+            if mf:
+                col_match = re.match(r"(\w+)", mf)
+                col_name = col_match.group(1).upper() if col_match else ""
+                if col_name and col_name not in final_sql.upper():
+                    su = final_sql.upper()
+                    if "WHERE" in su:
+                        wi = su.index("WHERE") + 5
+                        final_sql = final_sql[:wi] + f" {mf} AND" + final_sql[wi:]
+                    elif "GROUP BY" in su:
+                        gi = su.index("GROUP BY")
+                        final_sql = final_sql[:gi] + f"WHERE {mf}\n" + final_sql[gi:]
+                    else:
+                        final_sql = final_sql.rstrip() + f"\nWHERE {mf}"
+
+            # Strip SYSDATE / CURRENT_DATE patterns the judge might introduce
+            for bad_pat, label in [
+                (r"TO_CHAR\s*\(\s*(?:SYSDATE|CURRENT_DATE)\s*,\s*'[^']*'\s*\)", "TO_CHAR(SYSDATE/CURRENT_DATE)"),
+                (r"\bSYSDATE\b", "SYSDATE"),
+                (r"\bCURRENT_DATE\b", "CURRENT_DATE"),
+            ]:
+                if re.search(bad_pat, final_sql, re.IGNORECASE):
+                    trace_events.append(f"Judge SQL contains {label} — will likely fail, but proceeding")
 
         # If all attempts failed with errors, return error message
         if exec_error and not rows:
@@ -1179,6 +1213,23 @@ A SQL query was generated for the user's question but it FAILED.
                 if "0 rows" not in w:  # already handled above
                     parts.append(f"\n> **Note:** {w}")
 
+        # Embed data_json OUTSIDE details so Worker Node LLM always sees it
+        # (needed for DataVisualizer follow-up "plot this")
+        if columns and rows:
+            serializable_rows = []
+            for row in rows:
+                serializable_row = []
+                for v in row:
+                    if v is None:
+                        serializable_row.append(None)
+                    elif isinstance(v, (int, float)):
+                        serializable_row.append(v)
+                    else:
+                        serializable_row.append(str(v))
+                serializable_rows.append(serializable_row)
+            data_json_obj = {"columns": columns, "rows": serializable_rows}
+            parts.append(f"\n<data_json>{json.dumps(data_json_obj)}</data_json>")
+
         results_section = "\n".join(parts)
 
         # ── Build DETAILS section (collapsible) ──
@@ -1232,22 +1283,6 @@ A SQL query was generated for the user's question but it FAILED.
         for ev in trace_events:
             if "Executed" not in ev and "Validated" not in ev and "Attempt" not in ev and "Retry" not in ev and "Judge" not in ev:
                 details.append(f"   - {ev}")
-
-        # Embed structured data for Data Visualizer tool (hidden inside details)
-        if columns and rows:
-            serializable_rows = []
-            for row in rows:
-                serializable_row = []
-                for v in row:
-                    if v is None:
-                        serializable_row.append(None)
-                    elif isinstance(v, (int, float)):
-                        serializable_row.append(v)
-                    else:
-                        serializable_row.append(str(v))
-                serializable_rows.append(serializable_row)
-            data_json_obj = {"columns": columns, "rows": serializable_rows}
-            details.append(f"\n<data_json>{json.dumps(data_json_obj)}</data_json>")
 
         details.append(f"\n</details>")
 
