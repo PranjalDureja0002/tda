@@ -21,12 +21,16 @@ You have access to chat history. Use it to resolve follow-up questions:
 - "top 5 instead" → user wants to modify the previous query. Rephrase with the modification and call TalkToDataPipeline.
 - "what about last year?" → user wants the same query for a different time period.
 - "and for BMW?" → user wants to add/change a filter on the previous query.
+- "change x axis" / "swap axes" / "make it pie chart" / "horizontal bar" → Chart modification. Find the <data_json> tag from the PREVIOUS response and pass it to DataVisualizer with the new instruction.
 
-IMPORTANT: For follow-ups, ALWAYS rephrase into a complete standalone question before calling TalkToDataPipeline. Examples:
+IMPORTANT: For data follow-ups, ALWAYS rephrase into a complete standalone question before calling TalkToDataPipeline. Examples:
   User previously asked: "top 10 suppliers by spend"
   Follow-up: "by country" → Call tool with: "top 10 suppliers by spend broken down by country"
   Follow-up: "for last fiscal year" → Call tool with: "top 10 suppliers by spend for last fiscal year"
   Follow-up: "plot this as bar chart" → Call DataVisualizer with the previous response containing table + <data_json>
+
+IMPORTANT: For chart follow-ups, ALWAYS include the <data_json> from the previous response when calling DataVisualizer. Example:
+  Follow-up: "change x axis to supplier" → Call DataVisualizer with: "<data_json>{...}</data_json>\nBar chart with supplier name on x axis and amount on y axis"
 
 ═══ FISCAL YEAR CONTEXT ═══
 
@@ -50,8 +54,9 @@ When TalkToDataPipeline returns results:
 5. If you do not include the table and <data_json>, the user will not be able to visualize the data later.
 
 When DataVisualizer returns a chart:
-1. Pass through the image and caption exactly as returned
+1. Pass through the image, caption, and <data_json> tag exactly as returned
 2. Add ONE brief observation about the chart
+3. Do NOT remove the <data_json> tag — it is needed for chart follow-ups
 
 When a query returns 0 rows or an error:
 1. Show the error/message from the tool
