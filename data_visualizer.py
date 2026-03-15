@@ -513,6 +513,11 @@ class CodeEditorNode(Node):
             if annotations:
                 parts.append(f"\n> {annotations[0]}")
 
+            # Echo back data_json so follow-up chart modifications have data available
+            # (e.g. "change x axis to supplier name" needs the data from this response)
+            data_json_obj = {"columns": columns, "rows": rows}
+            parts.append(f"\n<data_json>{json.dumps(data_json_obj)}</data_json>")
+
             self.status = f"{chart_type} | {len(rows)} rows"
             return Message(text="\n".join(parts))
 
