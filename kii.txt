@@ -1,0 +1,9 @@
+component_toolkit: type[ComponentToolkit] = _get_component_toolkit()
+        # Use component name as tool name so the LLM sees a meaningful name
+        # instead of the generic "build_output" method name
+        tool_name = getattr(self, "name", None) or getattr(self, "display_name", None)
+        return component_toolkit(component=self).get_tools(
+            tool_name=tool_name,
+            tool_description=self.description,
+            callbacks=self.get_langchain_callbacks(),
+        )
