@@ -80,9 +80,20 @@ CHART_PLANNER_PROMPT = """You are a data visualization expert. Analyze the data 
     "annotations": ["optional insight to show on chart"]
 }}
 
+**CRITICAL axis rules (MUST follow):**
+- x_column MUST be the index of the CATEGORY/LABEL column (text/names — e.g., supplier names, regions, months)
+- y_columns MUST be the index(es) of the NUMERIC/VALUE column(s) (e.g., amounts, counts, quantities)
+- NEVER put a numeric column as x_column for bar/bar_horizontal charts
+- NEVER put a text/category column in y_columns
+- For "bar" chart: x_column = categories on horizontal axis, y_columns = values on vertical axis (vertical bars)
+- For "bar_horizontal" chart: x_column = categories on vertical axis, y_columns = values on horizontal axis (horizontal bars)
+- If user says "X in x axis and Y in y axis", use "bar" (vertical), set x_column to the column matching X, y_columns to the column matching Y
+- Default to "bar" (vertical) unless user explicitly asks for horizontal or there are >10 long labels
+
 **Decision rules:**
 - Pie: ONLY for 2-8 categories showing proportions/shares. Set group_others=true if >6 items.
-- Bar: For comparisons, rankings, top-N. Use bar_horizontal if labels are long or >10 items.
+- Bar (vertical): DEFAULT for comparisons, rankings, top-N with <=10 items.
+- Bar_horizontal: Only when labels are very long (>25 chars) or >10 items.
 - Line: For time series, trends, monthly/quarterly data. x_column must be the date/time column.
 - Stacked bar: For composition across categories (e.g., spend by region broken down by material type).
 - Scatter: For correlations between two numeric columns.
@@ -585,9 +596,59 @@ class CodeEditorNode(Node):
                 plan["x_column"] = fallback["x_column"]
             if "y_columns" not in plan:
                 plan["y_columns"] = fallback["y_columns"]
+
+            # ── Auto-fix swapped axes ──
+            # For bar/bar_horizontal: x_column should be text, y_columns should be numeric
+            plan = self._validate_and_fix_plan(plan, columns, rows)
             return plan
         except Exception:
             return fallback
+
+    def _validate_and_fix_plan(self, plan, columns, rows):
+        """Auto-fix common LLM mistakes in chart plans.
+
+        Main fix: if x_column points to a numeric column and y_columns point
+        to a text column, swap them. The x-axis should be categories (text),
+        y-axis should be values (numeric) for bar charts.
+        """
+        if not rows or not columns:
+            return plan
+
+        chart_type = plan.get("chart_type", "bar")
+        if chart_type not in ("bar", "bar_horizontal", "stacked_bar"):
+            return plan
+
+        x_col = plan.get("x_column", 0)
+        y_cols = plan.get("y_columns", [1])
+
+        # Detect column types from actual data (check first non-None value)
+        def _is_numeric_col(col_idx):
+            for row in rows[:10]:
+                if col_idx < len(row) and row[col_idx] is not None:
+                    return isinstance(row[col_idx], (int, float))
+            return False
+
+        x_is_numeric = _is_numeric_col(x_col)
+        y_all_text = all(not _is_numeric_col(y) for y in y_cols)
+
+        # If x is numeric and y is text → axes are swapped
+        if x_is_numeric and y_all_text and len(y_cols) == 1:
+            plan["x_column"], plan["y_columns"] = y_cols[0], [x_col]
+            # Also swap labels if present
+            x_label = plan.get("x_label", "")
+            y_label = plan.get("y_label", "")
+            if x_label and y_label:
+                plan["x_label"] = y_label
+                plan["y_label"] = x_label
+
+        # If x is numeric and y is also numeric, find the first text column for x
+        if x_is_numeric and not y_all_text:
+            for i in range(len(columns)):
+                if not _is_numeric_col(i):
+                    plan["x_column"] = i
+                    break
+
+        return plan
 
     def _llm_extract_data(self, content, user_request):
         """Ask the LLM to extract structured data from unstructured content."""
